@@ -1,0 +1,610 @@
+---
+title: "Final Project: Predicting Article Popularity in Online News Media Using Machine Learning"
+author: "Xiangyu Xiao and Binyu Yang"
+date: "2024-04-11"
+output: html_document
+---
+
+# 1. Data Preparation
+
+```{r}
+# Load the dataset
+data <- read.csv("D:/MBAN/Machine Learning and AI/FInal/online+news+popularity/OnlineNewsPopularity/OnlineNewsPopularity.csv")
+```
+
+```{r}
+# Check for missing values
+sum(is.na(data))
+# There are no missing values in the dataset
+```
+
+```{r}
+# Check for outliers of the target variable
+boxplot(data$shares)
+# As we see many outliers here, we need to remove those outliers. We use the IQR method to remove the outliers.
+```
+
+```{r}
+# Remove outliers
+library(dplyr)
+# Calculate the quartiles and IQR for the variable
+Q1 <- quantile(data$shares, 0.25)
+Q3 <- quantile(data$shares, 0.75)
+IQR <- Q3 - Q1
+
+# Define the bounds for what is considered an outlier
+lower_bound <- Q1 - 1.5 * IQR
+upper_bound <- Q3 + 1.5 * IQR
+
+# Filter out the rows where the variable is an outlier
+data_no_outliers <- data %>% 
+  filter(data$shares >= lower_bound & data$shares <= upper_bound)
+
+```
+
+# 2. EDA
+
+```{r}
+# Correlation between the variables
+# Select only numeric columns
+numeric_data <- select_if(data_no_outliers, is.numeric)
+
+# Now you can compute the correlation matrix
+correlation_matrix <- cor(numeric_data)
+
+# View the correlation matrix
+print(correlation_matrix)
+```
+
+```{r}
+# Showing descriptives
+summary(data_no_outliers)
+
+```
+
+```{r}
+# Displaying the frequency distribution of articles categorized into ‘popular’ and ‘non-popular’ classes
+library(ggplot2)
+data_no_outliers$popularity <- ifelse(data_no_outliers$shares > 1400, "popular", "non-popular")
+ggplot(data_no_outliers, aes(x = popularity)) + geom_bar(fill = "blue") + labs(title = "Frequency distribution of articles categorized into ‘popular’ and ‘non-popular’ classes")
+```
+
+```{r}
+# Frequency distribution of articles across different data channels (Lifestyle, Entertainment, Business, Social Media, Technology, and World), distribute in onr graph
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+
+# Gather the data channel columns into key-value pairs
+data_long <- data_no_outliers %>%
+  select(starts_with("data_channel_is_")) %>%
+  pivot_longer(cols = everything(), names_to = "Channel", values_to = "Frequency") %>%
+  group_by(Channel) %>%
+  summarise(Frequency = sum(Frequency)) %>%
+  mutate(Channel = sub("data_channel_is_", "", Channel)) # Clean up the channel names
+
+# Now, create the bar plot
+ggplot(data_long, aes(x = Channel, y = Frequency)) + 
+  geom_bar(stat = "identity") +
+  theme_minimal() +
+  xlab("Data Channel") + 
+  ylab("Number of Articles") +
+  ggtitle("Frequency Distribution of Articles Across Different Data Channels") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) # Rotate the x labels for better readability
+```
+
+```{r}
+# Frequency distribution of articles published on different weekdays (Monday, Tuesday, Wednesday, Thursday, Friday, Saturday, and Sunday)
+# Gather the weekday columns into key-value pairs
+weekday_data_long <- data_no_outliers %>%
+  select(starts_with("weekday_is_")) %>%
+  pivot_longer(cols = everything(), names_to = "Weekday", values_to = "Frequency") %>%
+  group_by(Weekday) %>%
+  summarise(Frequency = sum(Frequency)) %>%
+  mutate(Weekday = sub("weekday_is_", "", Weekday)) # Clean up the Weekday names
+
+# Create the distribution graph for weekdays
+ggplot(weekday_data_long, aes(x = Weekday, y = Frequency)) + 
+  geom_bar(stat = "identity") +
+  theme_minimal() +
+  xlab("Weekday") + 
+  ylab("Number of Articles") +
+  ggtitle("Distribution of Articles Across Weekdays") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) # Rotate the x labels for readability
+```
+
+```{r}
+# Cross-tabulation of the number of articles published on different weekdays and channels
+# Convert data channels from wide to long format
+data_long <- data_no_outliers %>%
+  pivot_longer(cols = starts_with("data_channel_is_"), names_to = "DataChannel", values_to = "ChannelValue") %>%
+  pivot_longer(cols = starts_with("weekday_is_"), names_to = "Weekday", values_to = "WeekdayValue") %>%
+  filter(ChannelValue == 1, WeekdayValue == 1) %>%
+  mutate(DataChannel = sub("data_channel_is_", "", DataChannel),
+         Weekday = sub("weekday_is_", "", Weekday)) %>%
+  select(-ChannelValue, -WeekdayValue)
+
+# Ensure unique rows for the combination of articles, DataChannel, and Weekday
+data_long <- distinct(data_long)
+
+# Step 2: Cross-tabulation
+cross_tab <- with(data_long, table(DataChannel, Weekday))
+
+# View the cross-tabulation results
+print(cross_tab)
+```
+
+# 3. Regression
+
+First, we use random forest to predict the number of shares an article will get Random Forest is an ensemble learning method that is good for handling non-linear data with interactions between variables. It is robust to overfitting and can handle a large number of features. OOB error, which is an average error of predictions on each training sample xᵢ, using only the trees that did not have xᵢ in their bootstrap sample, can be used for model evaluation.
+
+Advantages:
+
+Good for complex datasets with non-linear relationships.
+
+It has built-in methods for estimating model performance (OOB error).
+
+It can handle missing data to a certain extent and doesn't require feature scaling.
+
+Disadvantages:
+
+Can be slow to train with very large datasets. Less interpretable than linear models.
+
+```{r, cache=TRUE}
+# Random Forest Model
+library(randomForest)
+
+# Use parallel processing for faster training
+library(doParallel)
+cl <- makeCluster(detectCores() - 1)  # Use all cores except one
+registerDoParallel(cl)
+
+data_no_outliers$url <- NULL  # Remove the 'url' column
+data_no_outliers$shares <- as.numeric(data_no_outliers$shares)
+
+# Split the data into training and testing
+set.seed(123)  # Setting seed for reproducibility
+train_indices <- sample(seq_len(nrow(data_no_outliers)), size = floor(0.8 * nrow(data_no_outliers)))
+train_data <- data_no_outliers[train_indices, ]
+test_data <- data_no_outliers[-train_indices, ]
+train_data$popularity <- NULL
+test_data$popularity <- NULL
+
+rf_model <- randomForest(shares ~ ., data = train_data, ntree = 500)
+# Print the model
+rf_model
+```
+
+```{r}
+# Prediction and RMSPE calculation
+rf_predictions <- predict(rf_model, newdata = test_data)
+rf_rmspe <- sqrt(mean((test_data$shares - rf_predictions)^2)) / mean(test_data$shares)
+print(paste("RMSPE for Random Forest:", rf_rmspe))
+```
+
+```{r}
+# OOB
+rf_oob <- rf_model$err.rate[nrow(rf_model$err.rate), "OOB"]
+rf_oob
+```
+
+```{r}
+plot(rf_model, col = "blue")
+```
+
+\# The second model we use is the GBM model.
+
+GBM is a type of ensemble learning technique, where multiple models (typically decision trees) are combined to improve predictive performance. It builds the model in a stage-wise fashion; it constructs new models that predict the residuals or errors of prior models and then combines them into the final prediction.
+
+Advantages:
+
+GBM can deliver highly accurate predictions, often outperforming other machine learning algorithms.
+
+It can be used for both classification and regression tasks.
+
+GBM is capable of handling data with complex and non-linear relationships.
+
+GBM naturally ranks features by their importance, which is useful for feature selection.
+
+Disadvantages:
+
+If not tuned properly, GBM models can easily overfit, especially on small datasets.
+
+Training GBM models can be computationally intensive and time-consuming, especially with large datasets and a high number of trees.
+
+There are several hyperparameters (like number of trees, depth of trees, learning rate) that need careful tuning to avoid overfitting and underfitting.
+
+While individual trees are easy to interpret, a whole ensemble of trees (as used in GBM) can be difficult to interpret compared to simpler models.
+
+```{r, cache=TRUE}
+# GBM Model
+library(gbm)
+set.seed(123)  # Setting seed for reproducibility
+# Exclude the 'popularity' variable from the training dataset
+train_data$popularity <- NULL
+# Fit the model - start with default settings and adjust as necessary
+gbm_model <- gbm(shares ~ ., 
+                 data = train_data,
+                 distribution = "gaussian", # for regression
+                 n.trees = 500, 
+                 interaction.depth = 3,
+                 shrinkage = 0.01,
+                 cv.folds = 5, # for cross-validation
+                 n.minobsinnode = 10,
+                 verbose = FALSE)
+best_trees <- gbm.perf(gbm_model, method = "cv")
+
+```
+
+```{r}
+# Predict on the test set
+test_pred <- predict(gbm_model, newdata = test_data, n.trees = best_trees)
+```
+
+```{r}
+# OOB
+gbm_oob <- gbm_model$train.error[best_trees]
+gbm_oob
+```
+
+```{r}
+# Calculate the RMSPE
+gbm_rmspe <- sqrt(mean((test_data$shares - test_pred)^2)) / mean(test_data$shares)
+print(paste("RMSPE for GBM:", gbm_rmspe))
+```
+
+
+We use LPM as the benchmark model
+
+```{r}
+# Linear Regression Model
+lm_model <- lm(shares ~ ., data = train_data)
+lm_predictions <- predict(lm_model, newdata = test_data)
+lm_rmspe <- sqrt(mean((test_data$shares - lm_predictions)^2)) / mean(test_data$shares)
+
+lm_rmspe
+```
+
+Compare those models, we can see that The Random Forest model has the lowest RMSPE of approximately 62.02%, making it the best performer among the three in terms of prediction accuracy relative to the actual values.
+
+```{r}
+# Improvements in predictive accuracy compared to the benchmark model
+print(paste("Improvement in RMSPE over the benchmark model (Linear Regression):", rf_rmspe - lm_rmspe))
+```
+
+```{r}
+#Random Forest Feature Importance
+# Extract feature importance
+rf_importance <- importance(rf_model)
+
+# Sort the importances in decreasing order, keeping the names attached
+rf_sorted <- sort(rf_importance[, 1], decreasing = TRUE)  # Make sure to select the correct importance metric column
+
+# Get the names of the top 10 most important features
+top_features <- names(rf_sorted)[1:10]
+
+# Print the names and importance scores of the top 10 features
+print("Top 10 most important features in Random Forest:")
+print(top_features)
+print(rf_sorted[1:10])
+
+```
+
+```{r}
+# Base on the feature importance above, we can create a bar plot to visualize the top 10 most important features
+# Load the ggplot2 library
+library(ggplot2)
+
+# Create a vector of feature names
+features <- c("kw_avg_avg", "kw_max_avg", "timedelta", "LDA_02", 
+              "LDA_00", "LDA_04", "LDA_01", "self_reference_min_shares", 
+              "kw_avg_max", "LDA_03")
+
+# Create a vector of feature importance scores
+importances <- c(1536294821, 1248049647, 1106965489, 967967997, 
+                 1066104080, 983860358, 957251273, 924452507, 
+                 945569798, 898334227)
+
+# Combine into a data frame
+rf_imp_df <- data.frame(Feature = features, Importance = importances)
+
+# Create a bar plot for the top 10 most important features
+ggplot(rf_imp_df, aes(x = reorder(Feature, Importance), y = Importance)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  labs(title = "Top Feature Importance in Random Forest", x = "Top Features", y = "Importance") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1)) +
+  coord_flip()  # Flipping the coordinates for better readability
+
+```
+
+The Random Forest model outperformed the GBM and LPM models in terms of prediction accuracy, with an RMSPE of 62.02%. From this visualization, we can conclude that keyword-related features have a prominent role in the model's decisions, indicating the relevance of keyword metrics to the outcome variable. Additionally, several LDA (Latent Dirichlet Allocation) features also contribute meaningfully, suggesting that topics generated by LDA are useful for prediction in the given context. The feature timedelta also appears as an important factor, which may indicate that time-related aspects are significant in the model.
+
+# 4. Classification
+
+First, we use logistic regression to predict whether an article will be popular or not based on the number of shares it receives.Logistic regression is a statistical method used for binary classification, which predicts the probability that an observation belongs to one of two categories.
+
+Advantages:
+
+Provides probabilities for outcomes, which are easy to interpret.
+
+It is computationally inexpensive, making it highly efficient to train.
+
+Offers good performance for linearly separable classes.
+
+Gives a more informative result in terms of the likelihood of observations.
+
+Disadvantages:
+
+It assumes a linear relationship between the logit of the outcome and each predictor variables.
+
+It is typically restricted to binary classification problems.
+
+Performance can be negatively impacted by unbalanced data, leading to biased models.
+
+Susceptible to outliers and noisy data, which can distort the model’s performance.
+
+```{r}
+# Logistic Regression Model
+# Convert the target variable 'shares' to a binary variable 'popularity'
+data_no_outliers$popularity <- ifelse(data_no_outliers$shares > 1400, 1, 0)
+data_no_outliers$shares <- NULL  # Remove the 'shares' column
+
+# Split the data into training and testing
+set.seed(123)  # Setting seed for reproducibility
+train_indices <- sample(seq_len(nrow(data_no_outliers)), size = floor(0.8 * nrow(data_no_outliers)))
+train_data <- data_no_outliers[train_indices, ]
+test_data <- data_no_outliers[-train_indices, ]
+
+# Fit the logistic regression model
+logit_model <- glm(popularity ~ ., data = train_data, family = "binomial")
+logit_model
+```
+
+```{r}
+# Predictions and Evaluation
+# Predict on the test set
+logit_predictions <- predict(logit_model, newdata = test_data, type = "response")
+logit_predictions <- ifelse(logit_predictions > 0.5, 1, 0)
+
+# Confusion matrix
+conf_matrix <- table(test_data$popularity, logit_predictions)
+print(conf_matrix)
+
+```
+
+```{r}
+# Calculate accuracy
+accuracy <- sum(diag(conf_matrix)) / sum(conf_matrix)
+print(paste("Accuracy of Logistic Regression:", accuracy))
+# Calculate precision
+precision <- conf_matrix[2, 2] / sum(conf_matrix[, 2])
+print(paste("Precision of Logistic Regression:", precision))
+# Calculate recall
+recall <- conf_matrix[2, 2] / sum(conf_matrix[2, ])
+print(paste("Recall of Logistic Regression:", recall))
+# Calculate F1 score
+f1_score <- 2 * (precision * recall) / (precision + recall)
+print(paste("F1 Score of Logistic Regression:", f1_score))
+# Calculate AUC
+library(pROC)
+roc_obj <- roc(test_data$popularity, logit_predictions)
+auc <- auc(roc_obj)
+print(paste("AUC of Logistic Regression:", auc))
+```
+
+Then, we use decision tree model to do the same task.A decision tree consists of nodes that form a root, branches, and leaf nodes at the ends. Each internal node represents a "test" on an attribute, each branch represents the outcome of the test, and each leaf node represents a class label (in classification) or a continuous value (in regression).
+
+Advantages:
+
+Trees can be visualized, making them easy to interpret even without statistical knowledge.
+
+Can manage categorical and numerical data.
+
+Doesn’t assume a linear relationship and doesn’t require much data preparation.
+
+The features used at the top of the tree contribute the most to the decision process, indicating their importance.
+
+Disadvantages:
+
+Decision trees can create overly complex trees that do not generalize well to new data.
+
+This can be mitigated by pruning.
+
+Small changes in the data can result in a completely different tree being generated.
+
+Trees can be biased toward classes that dominate if the class balance isn't addressed. They are not ideal for tasks where relationships between features are non-linear.
+
+```{r}
+# Decision Tree Model
+library(rpart)
+library(rpart.plot)
+
+# Fit the decision tree model
+dt_model <- rpart(popularity ~ ., data = train_data, method = "class")
+# Plot the decision tree
+rpart.plot(dt_model, extra = 101, type = 2, fallen.leaves = TRUE, under = TRUE, faclen = 0)
+```
+
+```{r}
+# Predictions and Evaluation
+# Predict on the test set
+dt_predictions <- predict(dt_model, newdata = test_data, type = "class")
+
+# Confusion matrix
+conf_matrix_dt <- table(test_data$popularity, dt_predictions)
+print(conf_matrix_dt)
+```
+
+```{r}
+# Calculate accuracy
+accuracy_dt <- sum(diag(conf_matrix_dt)) / sum(conf_matrix_dt)
+print(paste("Accuracy of Decision Tree:", accuracy_dt))
+# Calculate precision
+precision_dt <- conf_matrix_dt[2, 2] / sum(conf_matrix_dt[, 2])
+print(paste("Precision of Decision Tree:", precision_dt))
+# Calculate recall
+recall_dt <- conf_matrix_dt[2, 2] / sum(conf_matrix_dt[2, ])
+print(paste("Recall of Decision Tree:", recall_dt))
+# Calculate F1 score
+f1_score_dt <- 2 * (precision_dt * recall_dt) / (precision_dt + recall_dt)
+print(paste("F1 Score of Decision Tree:", f1_score_dt))
+# Calculate AUC
+dt_predictions <- predict(dt_model, newdata = test_data, type = "prob")
+positive_class_probabilities <- dt_predictions[, "1"] 
+# Calculate ROC and AUC
+library(pROC)
+roc_obj_dt <- roc(response = test_data$popularity, predictor = positive_class_probabilities)
+auc_value <- auc(roc_obj_dt)
+print(auc_value)
+```
+
+Finally, Random forest model is used.
+
+```{r, cache=TRUE}
+# Random Forest Model for classification
+train_data$popularity <- as.factor(train_data$popularity)
+# Fit the random forest model
+rf_model <- randomForest(popularity ~ ., data = train_data, ntree = 500)
+# Print the model
+rf_model
+```
+
+```{r}
+# Predictions and Evaluation
+# Predict on the test set
+rf_predictions <- predict(rf_model, newdata = test_data)
+
+# Confusion matrix
+conf_matrix_rf <- table(test_data$popularity, rf_predictions)
+print(conf_matrix_rf)
+```
+
+```{r}
+# Calculate accuracy
+accuracy_rf <- sum(diag(conf_matrix_rf)) / sum(conf_matrix_rf)
+print(paste("Accuracy of Random Forest:", accuracy_rf))
+# Calculate precision
+precision_rf <- conf_matrix_rf[2, 2] / sum(conf_matrix_rf[, 2])
+print(paste("Precision of Random Forest:", precision_rf))
+# Calculate recall
+recall_rf <- conf_matrix_rf[2, 2] / sum(conf_matrix_rf[2, ])
+print(paste("Recall of Random Forest:", recall_rf))
+# Calculate F1 score
+f1_score_rf <- 2 * (precision_rf * recall_rf) / (precision_rf + recall_rf)
+print(paste("F1 Score of Random Forest:", f1_score_rf))
+# Calculate AUC
+rf_predictions <- predict(rf_model, newdata = test_data, type = "prob")
+positive_class_probabilities_rf <- rf_predictions[, "1"]
+
+# Calculate ROC and AUC
+roc_obj_rf <- roc(response = test_data$popularity, predictor = positive_class_probabilities_rf)
+auc_value_rf <- auc(roc_obj_rf)
+print(auc_value_rf)
+```
+
+```{r}
+# Use LPM as the benchmark
+lm_model <- lm(popularity ~ ., data = train_data)
+lm_predictions <- predict(lm_model, newdata = test_data)
+lm_rmspe <- sqrt(mean((test_data$popularity - lm_predictions)^2)) / mean(test_data$popularity)
+```
+
+The Random Forest model has the highest values across all metrics, indicating that it is the best model among the ones compared here. It has the highest accuracy, precision, recall, F1 score, and AUC. The high AUC value of 0.729 suggests good discriminative ability of the Random Forest model.
+
+```{r}
+# Improvements in predictive accuracy compared to the benchmark model
+print(paste("Improvement in accuracy over the benchmark model (Logistic Regression):", accuracy_rf - accuracy))
+print(paste("Improvement in precision over the benchmark model (Logistic Regression):", precision_rf - precision))
+print(paste("Improvement in recall over the benchmark model (Logistic Regression):", recall_rf - recall))
+print(paste("Improvement in F1 score over the benchmark model (Logistic Regression):", f1_score_rf - f1_score))
+print(paste("Improvement in AUC over the benchmark model (Logistic Regression):", auc_value_rf - auc))
+```
+
+```{r}
+# Visualization of the confusion matrix for Random Forest
+library(caret)
+confusionMatrix(conf_matrix_rf)
+```
+
+```{r}
+# Feature Importance for Random Forest
+# Extract feature importance
+rf_importance <- importance(rf_model)
+num_columns <- ncol(rf_importance)
+# Sort the importances in decreasing order, keeping the names attached
+if (num_columns >= 2) {
+  # If there are at least 2 columns, sort the second one
+  rf_sorted <- sort(rf_importance[, 2], decreasing = TRUE)  # Assuming column 2 is the desired metric
+} else if (num_columns == 1) {
+  # If there's only one column, sort it
+  rf_sorted <- sort(rf_importance[, 1], decreasing = TRUE)  # Sorting the only column
+} else {
+  stop("The importance matrix does not have any columns.")
+}
+# Get the names of the top 10 most important features
+top_features <- names(rf_sorted)[1:10]
+
+# Print the names and importance scores of the top 10 features
+print("Top 10 most important features in Random Forest:")
+
+print(top_features)
+print(rf_sorted[1:10])
+```
+
+```{r}
+# Create a bar plot for the top 10 most important features
+# Load the required library
+library(ggplot2)
+
+# Create a data frame for the top 10 features and their importance scores
+features <- c("kw_avg_avg", "kw_max_avg", "timedelta", "LDA_02", "LDA_00", 
+              "LDA_04", "LDA_01", "self_reference_min_shares", "kw_avg_max", "kw_avg_min")
+importances <- c(505.1791, 461.6429, 419.6487, 418.0953, 408.6538, 
+                 407.4231, 394.6831, 381.2182, 374.1768, 370.0082)
+feature_importance_df <- data.frame(Feature = features, Importance = importances)
+
+# Order the data frame by Importance in descending order for plotting
+feature_importance_df <- feature_importance_df[order(-feature_importance_df$Importance), ]
+
+# Create a bar plot for the top 10 most important features
+ggplot(feature_importance_df, aes(x = reorder(Feature, Importance), y = Importance)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  labs(title = "Top 10 Feature Importance in Random Forest", x = "Features", y = "Importance") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  coord_flip()  # Flip the coordinates for horizontal bar chart
+
+```
+
+From the chart, we can conclude the following:
+
+Keyword Average: The feature kw_avg_avg stands out as the most influential in the model, indicating that the average keyword relevance has the strongest relationship with the target variable.
+
+Other Keyword Features: kw_max_avg, kw_avg_max, and kw_avg_min also appear among the top important features, highlighting that keyword-related metrics play a significant role in the predictions made by the model.
+
+Timedelta: The feature timedelta comes in as the third most important, suggesting that the time factor may have a substantial effect on the outcome.
+
+LDA Topics: Several features generated from Latent Dirichlet Allocation (LDA), which are likely topic probabilities (LDA_00, LDA_02, LDA_04, LDA_01), are also crucial, demonstrating the model's reliance on the thematic structure of the data.
+
+Self-Reference: The feature self_reference_min_shares is included in the list, indicating the model's sensitivity to how much the content references itself in terms of shares.
+
+# 5. Reommendations
+
+Based on the analysis and results obtained from the models, we can propose recommendations for content creators and marketers:
+
+1.  Keyword Optimization: Both models underscore the significance of keyword-related features (kw_avg_avg, kw_max_avg, kw_avg_max, kw_avg_min). Therefore, it's crucial to research and utilize keywords effectively within your content. Identify keywords that not only pertain to the subject matter but are also terms that your audience frequently searches for. These should be incorporated naturally into the title, headings, and throughout the content in a way that maintains readability and engagement.
+
+2.  Topic Selection Using LDA: The importance of LDA features (LDA_00, LDA_01, LDA_02, LDA_04) across both models indicates that the chosen topics of the articles significantly influence popularity. Employing topic modeling techniques like LDA can help identify prevalent themes within your domain that resonate with readers. Creating content that aligns with these topics or trends can increase relevance and engagement with your target audience.
+
+3.  Timing of Content Release: The timedelta feature's prominence suggests the timing of article publication can impact popularity. Analyze your audience's online behavior to identify when they are most active and likely to engage with new content. Schedule your posts accordingly to maximize visibility and shares. Consider different time zones and peak activity times based on your audience demographics.
+
+4.  Self-Promotion and Social Proof: Self_reference_min_shares showing up in the classification model suggests that referencing one's own content and social share counts can positively affect popularity. Incorporate links to previous articles and display social share counts to provide social proof, potentially leading to increased trust and shareability.
+
+# 6. Conclusion
+
+In summary, the project's analysis of the Online News Popularity dataset aimed to model and predict article popularity. The Random Forest model exhibited the best performance with a notable AUC of 0.729, suggesting a strong ability to distinguish between popular and unpopular articles.
+
+Feature importance highlighted that keywords and topics derived from LDA analysis, as well as the timing of publication ('timedelta'), are critical factors in predicting popularity. For content creators, this translates into a strategy that emphasizes keyword optimization, topical relevance, and timing of publication.
+
+Challenges included managing the dataset's complexity and ensuring model generalization. Future research could explore more advanced text analysis techniques and the incorporation of real-time engagement data.
+
+The project underscores the potential of machine learning to inform and enhance content creation strategies, ultimately aiding publishers in effectively engaging their audience.
